@@ -1,0 +1,871 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>2D House Planner – 30m x 30m, Zoom, 2000 Items</title>
+<style>
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: Arial, sans-serif;
+    height: 100vh;
+    display: flex;
+    overflow: hidden;
+  }
+
+  #sidebar {
+    width: 360px;
+    border-right: 1px solid #ccc;
+    padding: 10px;
+    background: #f7f7f7;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    pointer-events: none;
+  }
+
+  #toolbar {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+  }
+
+  #toolbar button {
+    pointer-events: auto;
+    padding: 4px 6px;
+    font-size: 11px;
+    cursor: pointer;
+  }
+
+  #toolbar button.active {
+    background: #007bff;
+    color: #fff;
+  }
+
+  #palette {
+    flex: 1;
+    overflow-y: auto;
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 6px;
+    background: #fff;
+    border: 1px solid #ccc;
+    padding: 6px;
+  }
+
+  .palette-item {
+    border: 1px solid #aaa;
+    border-radius: 4px;
+    padding: 4px;
+    cursor: pointer;
+    background: #fafafa;
+    font-size: 11px;
+    transition: background 0.1s;
+    pointer-events: auto;
+  }
+
+  .palette-item:hover { background: #e9f3ff; }
+
+  .palette-color {
+    height: 14px;
+    border-radius: 2px;
+    margin-bottom: 3px;
+  }
+
+  #planner {
+    flex: 1;
+    position: relative;
+    overflow: auto;
+    background: #ddd;
+  }
+
+  #canvas {
+    position: relative;
+    width: 1134px;   /* ~30m at 0.378 px/cm */
+    height: 1134px;
+    margin: 20px;
+    background-image: linear-gradient(#eee 1px, transparent 1px),
+                      linear-gradient(90deg, #eee 1px, transparent 1px);
+    background-size: 20px 20px;
+    transform-origin: top left;
+  }
+
+  .item-instance {
+    position: absolute;
+    border: 1px solid #333;
+    border-radius: 3px;
+    padding: 2px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: move;
+    user-select: none;
+    z-index: 1;
+    text-align: center;
+    overflow: hidden;
+    word-wrap: break-word;
+  }
+
+  .item-instance.selected {
+    outline: 2px dashed #007bff;
+  }
+
+  #bottom-bar {
+    position: absolute;
+    bottom: 8px;
+    left: 8px;
+    background: rgba(255,255,255,0.9);
+    padding: 4px 8px;
+    border-radius: 4px;
+    border: 1px solid #ccc;
+    font-size: 11px;
+    z-index: 10;
+    display: flex;
+    gap: 6px;
+    align-items: center;
+  }
+
+  #gridSize {
+    padding: 4px;
+    font-size: 12px;
+    pointer-events: auto;
+  }
+
+  #roomToolBtn,
+  #wallToolBtn,
+  #search,
+  #category {
+    pointer-events: auto;
+  }
+
+  #search {
+    padding: 4px;
+    font-size: 12px;
+  }
+
+  #category {
+    padding: 4px;
+    font-size: 12px;
+  }
+
+  #sizeIndicator {
+    position: absolute;
+    padding: 3px 6px;
+    background: rgba(0,0,0,0.75);
+    color: #fff;
+    font-size: 11px;
+    border-radius: 4px;
+    pointer-events: none;
+    z-index: 99999;
+    display: none;
+  }
+
+  #zoomIn, #zoomOut, #zoomReset {
+    padding: 2px 6px;
+    font-size: 11px;
+    cursor: pointer;
+  }
+</style>
+</head>
+<body>
+
+<div id="sidebar">
+  <h2 style="pointer-events:auto;">2D House Planner</h2>
+
+  <div id="toolbar">
+    <button id="roomToolBtn">Room tool</button>
+    <button id="wallToolBtn">Wall tool</button>
+    <button id="deleteToolBtn">Delete tool</button>
+    <button id="renameToolBtn">Rename tool</button>
+    <button id="scaleToolBtn">Re-scale tool</button>
+  </div>
+
+  <label for="gridSize" style="pointer-events:auto;font-size:12px;">Grid size:</label>
+  <select id="gridSize">
+    <option value="20">10mm Grid</option>
+    <option value="10">5mm Grid</option>
+    <option value="4">2mm Grid</option>
+    <option value="0">No Grid</option>
+  </select>
+
+  <input id="search" type="text" placeholder="Search…" />
+
+  <select id="category">
+    <option value="all">All categories</option>
+  </select>
+
+  <div id="palette"></div>
+</div>
+
+<div id="planner">
+  <div id="canvas">
+    <div id="sizeIndicator"></div>
+  </div>
+  <div id="bottom-bar">
+    <button id="clearAll">Clear all</button>
+    <span id="status">Items: 0</span>
+    <button id="zoomOut">-</button>
+    <button id="zoomIn">+</button>
+    <button id="zoomReset">Reset</button>
+  </div>
+</div>
+
+<script>
+  // ---------- ITEM GENERATION (2000 realistic names) ----------
+  const allItems = [];
+
+  function addItem(name, category, baseW, baseH, color) {
+    const jitterW = baseW * 0.25;
+    const jitterH = baseH * 0.25;
+    const w = Math.max(20, Math.round(baseW + (Math.random() * 2 - 1) * jitterW));
+    const h = Math.max(20, Math.round(baseH + (Math.random() * 2 - 1) * jitterH));
+    allItems.push({
+      id: name,
+      name,
+      display: name,
+      category,
+      color,
+      w,
+      h
+    });
+  }
+
+  function pick(arr) {
+    return arr[Math.floor(Math.random() * arr.length)];
+  }
+
+  const patterns = {
+    "Bathroom – Fixtures": {
+      bases: [
+        "Toilet Close Coupled", "Toilet Back to Wall", "Toilet Wall Hung",
+        "Vanity", "Wall Hung Vanity", "Floor Standing Vanity",
+        "Basin Round", "Basin Rectangular", "Mirror Cabinet", "Mirror"
+      ],
+      materials: ["Ceramic", "Porcelain", "Stone", "Gloss White", "Matte White"],
+      styles: ["Modern", "Classic", "Minimal", "Soft Edge", "Square Edge"],
+      baseW: 80, baseH: 60
+    },
+    "Bathroom – Showers & Baths": {
+      bases: [
+        "Shower", "Walk-in Shower", "Corner Shower",
+        "Inset Bath", "Freestanding Bath", "Back-to-Wall Bath",
+        "Shower over Bath"
+      ],
+      materials: ["Acrylic", "Steel", "Stone", "Frameless Glass", "Semi-Frameless"],
+      styles: ["Modern", "Classic", "Compact", "Lux"],
+      baseW: 140, baseH: 80
+    },
+    "Bedroom – Beds": {
+      bases: [
+        "Single Bed", "King Single Bed", "Double Bed", "Queen Bed", "King Bed",
+        "Loft Bed", "Bunk Bed", "Day Bed"
+      ],
+      materials: ["Timber", "Upholstered", "Metal", "Fabric", "Leather"],
+      styles: ["Storage", "Low Profile", "Canopy", "Panel", "Slat"],
+      baseW: 180, baseH: 200
+    },
+    "Decor": {
+      bases: [
+        "Rug", "Wall Art", "Mirror Round", "Mirror Rectangular",
+        "Indoor Plant", "Floor Vase", "Wall Clock", "Sculpture"
+      ],
+      materials: ["Wool", "Cotton", "Jute", "Glass", "Metal", "Timber", "Ceramic"],
+      styles: ["Modern", "Boho", "Scandi", "Industrial", "Minimal"],
+      baseW: 100, baseH: 80
+    },
+    "Kitchen – Appliances": {
+      bases: [
+        "Top Freezer Fridge", "Bottom Freezer Fridge", "French Door Fridge",
+        "Side-by-Side Fridge", "Bar Fridge", "Wall Oven", "Freestanding Oven",
+        "Gas Cooktop", "Induction Cooktop", "Electric Cooktop",
+        "Microwave", "Dishwasher", "Canopy Rangehood", "Slideout Rangehood"
+      ],
+      materials: ["Stainless Steel", "Black Glass", "White", "Integrated Panel"],
+      styles: ["Standard", "Premium", "Professional", "Compact"],
+      baseW: 80, baseH: 80
+    },
+    "Kitchen – Cabinets": {
+      bases: [
+        "Base Cabinet", "Wall Cabinet", "Pantry Cabinet", "Corner Cabinet",
+        "Drawer Stack", "Sink Cabinet", "Open Shelf"
+      ],
+      materials: ["Melamine", "Timber Veneer", "Two-Pack", "Laminate"],
+      styles: ["Flat Panel", "Shaker", "Handleless", "Framed"],
+      baseW: 90, baseH: 60
+    },
+    "Lighting": {
+      bases: [
+        "Ceiling Light", "Downlight", "Pendant Light", "Track Light",
+        "Wall Sconce", "Floor Lamp", "Desk Lamp", "Chandelier"
+      ],
+      materials: ["Glass", "Metal", "Brass", "Black", "White"],
+      styles: ["Modern", "Industrial", "Classic", "Minimal", "Scandi"],
+      baseW: 40, baseH: 40
+    },
+    "Living – Sofas": {
+      bases: [
+        "Two Seater Sofa", "Three Seater Sofa", "Four Seater Sofa",
+        "Sectional Sofa Left", "Sectional Sofa Right",
+        "Chaise Sofa Left", "Chaise Sofa Right",
+        "Recliner Sofa", "Loveseat", "Modular Sofa"
+      ],
+      materials: ["Fabric", "Leather", "Velvet", "Linen"],
+      styles: ["Low Profile", "High Back", "Tufted", "Track Arm", "Rolled Arm"],
+      baseW: 200, baseH: 90
+    },
+    "Misc – Storage": {
+      bases: [
+        "Storage Unit", "Plastic Crate", "Stackable Box",
+        "Storage Cube", "Storage Bin", "Storage Basket"
+      ],
+      materials: ["Plastic", "Fabric", "Metal", "Timber"],
+      styles: ["Open", "Lidded", "Stackable", "Modular"],
+      baseW: 80, baseH: 60
+    },
+    "Openings – Doors": {
+      bases: [
+        "Hinged Door", "Double Hinged Door", "Sliding Door",
+        "Stacker Door", "Bifold Door", "Cavity Slider",
+        "Garage Door", "Entry Door", "French Door"
+      ],
+      materials: ["Timber", "Aluminium", "Steel", "Glass"],
+      styles: ["Solid", "Glazed", "Panelled", "Flush", "Frameless"],
+      baseW: 100, baseH: 20
+    },
+    "Openings – Windows": {
+      bases: [
+        "Awning Window", "Sliding Window", "Double Hung Window",
+        "Fixed Window", "Corner Window", "Bay Window",
+        "Highlight Window", "Skylight"
+      ],
+      materials: ["Aluminium", "Timber", "uPVC"],
+      styles: ["Clear Glass", "Tinted Glass", "Frosted Glass", "Double Glazed"],
+      baseW: 120, baseH: 20
+    },
+    "Outdoor": {
+      bases: [
+        "Outdoor Sofa", "Outdoor Armchair", "Outdoor Dining Table",
+        "Outdoor Dining Chair", "BBQ", "Outdoor Kitchen",
+        "Fire Pit", "Garden Bench", "Sun Lounge", "Outdoor Umbrella",
+        "Pergola", "Deck", "Planter Box", "Tree", "Shrub", "Hedge", "Lawn"
+      ],
+      materials: ["Timber", "Wicker", "Metal", "Concrete", "Stone"],
+      styles: ["Coastal", "Modern", "Classic", "Industrial"],
+      baseW: 140, baseH: 90
+    },
+    "Seating": {
+      bases: [
+        "Dining Chair", "Armchair", "Office Chair", "Bar Stool",
+        "Lounge Chair", "Accent Chair", "Bench Seat", "Stool"
+      ],
+      materials: ["Timber", "Metal", "Plastic", "Upholstered"],
+      styles: ["High Back", "Low Back", "Swivel", "Stackable"],
+      baseW: 50, baseH: 50
+    },
+    "Storage": {
+      bases: [
+        "Wardrobe", "Tallboy", "Dresser", "Bookshelf",
+        "Cabinet", "Sideboard", "TV Unit"
+      ],
+      materials: ["Melamine", "Timber", "Veneer", "Glass Front"],
+      styles: ["Sliding", "Hinged", "Open Shelves", "Drawers"],
+      baseW: 120, baseH: 60
+    },
+    "Tables": {
+      bases: [
+        "Dining Table", "Coffee Table", "Side Table",
+        "Console Table", "Desk", "Workstation"
+      ],
+      materials: ["Timber", "Glass", "Metal", "Stone"],
+      styles: ["Rectangular", "Round", "Square", "Oval", "Extendable"],
+      baseW: 120, baseH: 70
+    },
+    "Utility": {
+      bases: [
+        "Laundry Trough", "Washing Machine", "Clothes Dryer",
+        "Stacked Washer Dryer", "Hot Water System",
+        "Heat Pump Unit", "Electrical Switchboard",
+        "NBN Box", "Gas Meter", "Water Meter",
+        "Workbench", "Tool Cabinet", "Shelving Rack"
+      ],
+      materials: ["Steel", "Plastic", "Enamel", "Powder Coated"],
+      styles: ["Wall Mounted", "Floor Mounted", "Freestanding"],
+      baseW: 90, baseH: 70
+    }
+  };
+
+  const catColors = {
+    "Bathroom – Fixtures": "#adb5bd",
+    "Bathroom – Showers & Baths": "#74c0fc",
+    "Bedroom – Beds": "#a8dadc",
+    "Decor": "#b5838d",
+    "Kitchen – Appliances": "#f94144",
+    "Kitchen – Cabinets": "#577590",
+    "Lighting": "#ffe066",
+    "Living – Sofas": "#f4a261",
+    "Misc – Storage": "#adb5bd",
+    "Openings – Doors": "#ffb703",
+    "Openings – Windows": "#8ecae6",
+    "Outdoor": "#52b788",
+    "Seating": "#e76f51",
+    "Storage": "#8d99ae",
+    "Tables": "#e9c46a",
+    "Utility": "#6c757d"
+  };
+
+  const usedNames = new Set();
+  let totalCount = 0;
+
+  while (totalCount < 2000) {
+    for (const cat in patterns) {
+      const p = patterns[cat];
+      const base = pick(p.bases);
+      const hasMat = p.materials && p.materials.length > 0;
+      const hasStyle = p.styles && p.styles.length > 0;
+
+      const r = Math.random();
+      let name = base;
+
+      if (hasMat && hasStyle) {
+        if (r < 0.7) {
+          const material = pick(p.materials);
+          let style = pick(p.styles);
+          if (!style) style = "Standard";
+          name = `${base} – ${material} – ${style}`;
+        } else if (r < 0.9) {
+          const material = pick(p.materials);
+          name = `${base} – ${material}`;
+        } else {
+          let style = pick(p.styles);
+          if (!style) style = "Standard";
+          name = `${base} – ${style}`;
+        }
+      } else if (hasMat && !hasStyle) {
+        if (r < 0.7) {
+          const material = pick(p.materials);
+          const style = "Standard";
+          name = `${base} – ${material} – ${style}`;
+        } else {
+          const material = pick(p.materials);
+          name = `${base} – ${material}`;
+        }
+      } else if (!hasMat && hasStyle) {
+        const style = pick(p.styles) || "Standard";
+        name = `${base} – ${style}`;
+      } else {
+        name = base;
+      }
+
+      if (usedNames.has(name)) continue;
+      usedNames.add(name);
+
+      addItem(name, cat, p.baseW, p.baseH, catColors[cat]);
+      totalCount++;
+      if (totalCount >= 2000) break;
+    }
+  }
+
+  // ---------- UI refs ----------
+  const palette = document.getElementById("palette");
+  const search = document.getElementById("search");
+  const category = document.getElementById("category");
+  const planner = document.getElementById("planner");
+  const canvas = document.getElementById("canvas");
+  const status = document.getElementById("status");
+  const clearAll = document.getElementById("clearAll");
+  const gridSizeSelect = document.getElementById("gridSize");
+  const sizeIndicator = document.getElementById("sizeIndicator");
+
+  const deleteToolBtn = document.getElementById("deleteToolBtn");
+  const renameToolBtn = document.getElementById("renameToolBtn");
+  const scaleToolBtn = document.getElementById("scaleToolBtn");
+  const roomToolBtn = document.getElementById("roomToolBtn");
+  const wallToolBtn = document.getElementById("wallToolBtn");
+
+  const zoomInBtn = document.getElementById("zoomIn");
+  const zoomOutBtn = document.getElementById("zoomOut");
+  const zoomResetBtn = document.getElementById("zoomReset");
+
+  // scale: 0.378 px per cm => 30m (~3000cm) ≈ 1134px
+  const CM_TO_PX = 0.378;
+
+  // ---------- Palette ----------
+  const categories = [...new Set(allItems.map(i => i.category))].sort();
+  categories.forEach(c => {
+    const opt = document.createElement("option");
+    opt.value = c;
+    opt.textContent = c;
+    category.appendChild(opt);
+  });
+
+  function renderPalette() {
+    const s = search.value.toLowerCase();
+    const c = category.value;
+    palette.innerHTML = "";
+
+    allItems
+      .filter(i =>
+        (c === "all" || i.category === c) &&
+        (i.name.toLowerCase().includes(s) || i.display.toLowerCase().includes(s))
+      )
+      .forEach(item => {
+        const div = document.createElement("div");
+        div.className = "palette-item";
+        div.dataset.id = item.id;
+
+        const color = document.createElement("div");
+        color.className = "palette-color";
+        color.style.background = item.color;
+
+        const name = document.createElement("div");
+        name.textContent = item.display;
+
+        const meta = document.createElement("div");
+        meta.style.fontSize = "10px";
+        meta.style.color = "#555";
+        meta.textContent = item.category;
+
+        div.appendChild(color);
+        div.appendChild(name);
+        div.appendChild(meta);
+
+        div.onclick = () => startPlacement(item);
+        palette.appendChild(div);
+      });
+  }
+
+  search.addEventListener("input", renderPalette);
+  category.addEventListener("change", renderPalette);
+
+  // ---------- Grid size + snapping ----------
+  let currentSnapSize = 20;
+
+  gridSizeSelect.addEventListener("change", () => {
+    const val = parseInt(gridSizeSelect.value, 10);
+    if (val === 0) {
+      canvas.style.backgroundImage = "none";
+      currentSnapSize = 1;
+    } else {
+      canvas.style.backgroundImage =
+        `linear-gradient(#eee 1px, transparent 1px),
+         linear-gradient(90deg, #eee 1px, transparent 1px)`;
+      canvas.style.backgroundSize = `${val}px ${val}px`;
+      currentSnapSize = val;
+    }
+  });
+
+  // ---------- Zoom ----------
+  let zoomLevel = 1;
+
+  function applyZoom() {
+    canvas.style.transform = `scale(${zoomLevel})`;
+  }
+
+  zoomInBtn.onclick = () => {
+    zoomLevel = Math.min(zoomLevel + 0.1, 3);
+    applyZoom();
+  };
+
+  zoomOutBtn.onclick = () => {
+    zoomLevel = Math.max(zoomLevel - 0.1, 0.2);
+    applyZoom();
+  };
+
+  zoomResetBtn.onclick = () => {
+    zoomLevel = 1;
+    applyZoom();
+  };
+
+  // ---------- Tools & placement ----------
+  let placing = null;      // { item, startX, startY }
+  let previewBox = null;
+  let instances = [];      // { el, item, isRoom, isWall }
+  let selected = null;
+  let zCounter = 1;
+  let draggingDisabled = false;
+  let currentTool = null;  // null, 'room', 'wall', 'delete', 'rename', 'scale'
+
+  const roomTool = {
+    name: "Room",
+    color: "#d0e6ff",
+    isRoom: true
+  };
+
+  const wallTool = {
+    name: "Wall",
+    color: "#999999",
+    isWall: true
+  };
+
+  function setTool(toolName) {
+    currentTool = toolName;
+    draggingDisabled = toolName === 'room' || toolName === 'wall';
+    roomToolBtn.classList.toggle('active', toolName === 'room');
+    wallToolBtn.classList.toggle('active', toolName === 'wall');
+    deleteToolBtn.classList.toggle('active', toolName === 'delete');
+    renameToolBtn.classList.toggle('active', toolName === 'rename');
+    scaleToolBtn.classList.toggle('active', toolName === 'scale');
+
+    if (toolName !== 'room' && toolName !== 'wall') {
+      if (previewBox) {
+        previewBox.remove();
+        previewBox = null;
+      }
+      placing = null;
+      canvas.style.cursor = (toolName === 'delete' || toolName === 'rename' || toolName === 'scale')
+        ? 'crosshair'
+        : 'default';
+    } else {
+      canvas.style.cursor = 'crosshair';
+    }
+  }
+
+  roomToolBtn.onclick = () => {
+    if (currentTool === 'room') {
+      setTool(null);
+    } else {
+      startPlacement(roomTool);
+      setTool('room');
+    }
+  };
+
+  wallToolBtn.onclick = () => {
+    if (currentTool === 'wall') {
+      setTool(null);
+    } else {
+      startPlacement(wallTool);
+      setTool('wall');
+    }
+  };
+
+  deleteToolBtn.onclick = () => {
+    setTool(currentTool === 'delete' ? null : 'delete');
+  };
+
+  renameToolBtn.onclick = () => {
+    setTool(currentTool === 'rename' ? null : 'rename');
+  };
+
+  scaleToolBtn.onclick = () => {
+    setTool(currentTool === 'scale' ? null : 'scale');
+  };
+
+  function startPlacement(item) {
+    placing = { item, startX: null, startY: null };
+    if (previewBox) previewBox.remove();
+    previewBox = null;
+    canvas.style.cursor = "crosshair";
+    draggingDisabled = true;
+  }
+
+  // Mouse down: begin drawing preview
+  canvas.addEventListener("mousedown", e => {
+    if (!placing) return;
+    const rect = canvas.getBoundingClientRect();
+    placing.startX = (e.clientX - rect.left) / zoomLevel;
+    placing.startY = (e.clientY - rect.top) / zoomLevel;
+
+    previewBox = document.createElement("div");
+    previewBox.style.position = "absolute";
+    previewBox.style.border = "2px dashed #007bff";
+    previewBox.style.background = placing.item.isRoom
+      ? "rgba(150,200,255,0.25)"
+      : placing.item.isWall
+        ? "rgba(150,150,150,0.35)"
+        : "rgba(0,150,255,0.15)";
+    previewBox.style.zIndex = "9999";
+    canvas.appendChild(previewBox);
+  });
+
+  // Mouse move: resize preview + show cm indicator
+  canvas.addEventListener("mousemove", e => {
+    if (!placing || !previewBox) return;
+
+    const rect = canvas.getBoundingClientRect();
+    const x = (e.clientX - rect.left) / zoomLevel;
+    const y = (e.clientY - rect.top) / zoomLevel;
+
+    const w = x - placing.startX;
+    const h = y - placing.startY;
+
+    const left = Math.min(x, placing.startX);
+    const top = Math.min(y, placing.startY);
+    const width = Math.abs(w);
+    const height = Math.abs(h);
+
+    previewBox.style.left = left + "px";
+    previewBox.style.top = top + "px";
+    previewBox.style.width = width + "px";
+    previewBox.style.height = height + "px";
+
+    const cmW = (width / CM_TO_PX).toFixed(1);
+    const cmH = (height / CM_TO_PX).toFixed(1);
+
+    sizeIndicator.style.left = (left + width + 10) + "px";
+    sizeIndicator.style.top = (top + height + 10) + "px";
+    sizeIndicator.textContent = `${cmW} cm × ${cmH} cm`;
+    sizeIndicator.style.display = "block";
+  });
+
+  // Mouse up: finalize placement
+  canvas.addEventListener("mouseup", () => {
+    if (!placing || !previewBox) return;
+
+    const finalBox = document.createElement("div");
+    finalBox.className = "item-instance";
+    finalBox.style.left = previewBox.style.left;
+    finalBox.style.top = previewBox.style.top;
+    finalBox.style.width = previewBox.style.width;
+    finalBox.style.height = previewBox.style.height;
+    finalBox.style.background = placing.item.color;
+
+    const isRoom = !!placing.item.isRoom;
+    const isWall = !!placing.item.isWall;
+
+    if (isRoom) {
+      finalBox.style.zIndex = "1";
+      const roomName = prompt("Room name:", "Room") || "Room";
+      finalBox.textContent = roomName;
+    } else if (isWall) {
+      finalBox.style.zIndex = "500";
+      finalBox.textContent = "Wall";
+    } else {
+      finalBox.style.zIndex = (1000 + ++zCounter).toString();
+      finalBox.textContent = placing.item.name || placing.item.display;
+    }
+
+    const boxWidth = parseInt(finalBox.style.width) || placing.item.w || 60;
+    let fontSize = Math.round(boxWidth * 0.12);
+    if (fontSize < 8) fontSize = 8;
+    finalBox.style.fontSize = fontSize + "px";
+
+    canvas.appendChild(finalBox);
+    instances.push({ el: finalBox, item: placing.item, isRoom, isWall });
+
+    previewBox.remove();
+    previewBox = null;
+    placing = null;
+    draggingDisabled = false;
+    if (isRoom || isWall) setTool(null);
+    canvas.style.cursor = currentTool ? 'crosshair' : 'default';
+
+    sizeIndicator.style.display = "none";
+
+    enableDragging(finalBox);
+    attachToolHandlers(finalBox);
+    updateStatus();
+  });
+
+  // Dragging (rooms bottom, walls mid, items top)
+  function enableDragging(el) {
+    let dragging = false;
+    let offX = 0, offY = 0;
+
+    el.addEventListener("mousedown", e => {
+      if (currentTool && currentTool !== 'room' && currentTool !== 'wall') return;
+      if (placing || draggingDisabled) return;
+      dragging = true;
+      const r = el.getBoundingClientRect();
+      const p = canvas.getBoundingClientRect();
+      offX = (e.clientX - r.left) / zoomLevel;
+      offY = (e.clientY - r.top) / zoomLevel;
+
+      const inst = instances.find(i => i.el === el);
+      if (inst && inst.isRoom) {
+        el.style.zIndex = "1";
+      } else if (inst && inst.isWall) {
+        el.style.zIndex = "500";
+      } else {
+        el.style.zIndex = (1000 + ++zCounter).toString();
+      }
+      e.stopPropagation();
+    });
+
+    document.addEventListener("mousemove", e => {
+      if (!dragging) return;
+      const p = canvas.getBoundingClientRect();
+      let x = (e.clientX - p.left) / zoomLevel - offX;
+      let y = (e.clientY - p.top) / zoomLevel - offY;
+      const snap = currentSnapSize || 1;
+      x = Math.round(x / snap) * snap;
+      y = Math.round(y / snap) * snap;
+      el.style.left = x + "px";
+      el.style.top = y + "px";
+    });
+
+    document.addEventListener("mouseup", () => dragging = false);
+  }
+
+  // Delete / rename / scale tools
+  function attachToolHandlers(el) {
+    el.addEventListener("click", e => {
+      if (!currentTool || currentTool === 'room' || currentTool === 'wall') return;
+
+      const inst = instances.find(i => i.el === el);
+      const isRoom = inst && inst.isRoom;
+      const isWall = inst && inst.isWall;
+
+      if (currentTool === 'delete') {
+        canvas.removeChild(el);
+        instances = instances.filter(i => i.el !== el);
+        updateStatus();
+        return;
+      }
+
+      if (currentTool === 'rename') {
+        const currentText = el.textContent || "";
+        const newName = prompt("New name:", currentText);
+        if (newName && newName.trim() !== "") {
+          el.textContent = newName.trim();
+        }
+        return;
+      }
+
+      if (currentTool === 'scale') {
+        const currentWidth = parseFloat(el.style.width) || el.offsetWidth;
+        const currentHeight = parseFloat(el.style.height) || el.offsetHeight;
+        const input = prompt("Scale percentage (e.g. 120 for 120%):", "100");
+        if (!input) return;
+        const pct = parseFloat(input);
+        if (isNaN(pct) || pct <= 0) return;
+        const factor = pct / 100;
+        const newW = currentWidth * factor;
+        const newH = currentHeight * factor;
+        el.style.width = newW + "px";
+        el.style.height = newH + "px";
+
+        const boxWidth = newW;
+        let fontSize = Math.round(boxWidth * 0.12);
+        if (fontSize < 8) fontSize = 8;
+        el.style.fontSize = fontSize + "px";
+
+        if (isRoom) {
+          el.style.zIndex = "1";
+        } else if (isWall) {
+          el.style.zIndex = "500";
+        } else {
+          el.style.zIndex = (1000 + ++zCounter).toString();
+        }
+        return;
+      }
+    });
+  }
+
+  clearAll.onclick = () => {
+    instances.forEach(i => canvas.removeChild(i.el));
+    instances = [];
+    selected = null;
+    updateStatus();
+  };
+
+  function updateStatus() {
+    status.textContent = "Items: " + instances.length;
+  }
+
+  renderPalette();
+  updateStatus();
+  applyZoom();
+</script>
+
+</body>
+</html>
